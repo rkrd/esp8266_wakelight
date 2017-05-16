@@ -1,16 +1,20 @@
 /* TODO
+ * - Create time handling via calculation of deepsleep time etc.
  * - Sync time via internet
  * - Deepsleep
  *		+ Wake up every hour to check if it soon will be time to wake, adjust sleep intervall to match safe wake up delay.
  * - Disable deepsleep if reset is from reset button.
  * - Wake up from deepsleep from button or similar. Use reset-button.
  * - Extend setup mode/function.
+ * Notes:
  * - rtc mem and ROM are not the same :)
  */
 
 /* Look at this for persistent memory and maybe remove RTC module
  *  https://github.com/HarringayMakerSpace/IoT/tree/master/ESPDailyTask
  */
+
+#include <time.h>
 #include <ESP8266WiFi.h>
 #include <EEPROM.h>
 
@@ -23,7 +27,6 @@ extern "C" {
 #include "wifi.h"
 
 void read_mem(void);
-uint8_t set_time(uint16_t _y, uint8_t _m, uint8_t _d, uint8_t _H, uint8_t _M, uint8_t S);
 void handle_client(WiFiClient *client);
 void set_alarm(String *req);
 bool write_mem(uint8_t d, uint8_t h, uint8_t m);
