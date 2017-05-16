@@ -11,9 +11,6 @@
 /* Look at this for persistent memory and maybe remove RTC module
  *  https://github.com/HarringayMakerSpace/IoT/tree/master/ESPDailyTask
  */
-#include <TimeLib.h>
-#include <Time.h>
-#include <DS1302RTC.h>
 #include <ESP8266WiFi.h>
 #include <EEPROM.h>
 
@@ -33,18 +30,11 @@ bool write_mem(uint8_t d, uint8_t h, uint8_t m);
 void update_crc(void);
 uint32_t calc32(const uint8_t *data, size_t length);
 
-// DS1302 drive pins
-#define DS1302_GND_PIN 13
-#define DS1302_VCC_PIN 12
-
 // Storage capacity is 512 bytes
 struct {
     uint32_t crc32;
     byte data[508];
 } rtc_data;
-
-// Set pins:  CE, IO,CLK
-DS1302RTC RTC(0, 2, 15);
 
 WiFiServer server(80);
 
@@ -81,7 +71,6 @@ void setup()
             // Handle crc failure
         }
     } else {
-        // RTC mem failed try to restore from ROM
         read_mem();
     }
     // DEBUG
@@ -92,31 +81,6 @@ void setup()
         Serial.println(wake_minute[i]);
 
     }
-
-#ifdef USE_RTC
-    Serial.println("DS1302RTC Read Test");
-    Serial.println("-------------------");
-
-    digitalWrite(DS1302_GND_PIN, LOW);
-    digitalWrite(DS1302_VCC_PIN, HIGH);
-    pinMode(DS1302_GND_PIN, OUTPUT);
-    pinMode(DS1302_VCC_PIN, OUTPUT);
-
-    Serial.println("RTC module activated");
-    Serial.println();
-    delay(500);
-
-    if (RTC.haltRTC()) {
-        Serial.println("The DS1302 is stopped.  Please run the SetTime");
-        Serial.println("example to initialize the time and begin running.");
-        Serial.println();
-        set_time(2016, 1, 1, 12, 3, 4); // DEBUG
-    }
-    if (!RTC.writeEN()) {
-        Serial.println("The DS1302 is write protected. This normal.");
-        Serial.println();
-    }
-#endif
 
     if (0 /*!goto_sleep*/) {
         WiFi.begin(ssid, password);
@@ -140,29 +104,11 @@ void setup()
 
 void loop()
 {
-    tmElements_t tm;
-
     WiFiClient client = server.available();
     if (client && client.available()) { 
         handle_client(&client);
     }
 
-    Serial.print("UNIX Time: ");
-    Serial.print(RTC.get());
-
-
-    if (! RTC.read(tm)) {
-        char *fmt = "Time = %02d:%02d:%02d %d-%02d-%02d\n";
-        char s[30];
-        snprintf(s, sizeof(s) - 1, fmt, tm.Hour, tm.Minute, tm.Second, 
-                tmYearToCalendar(tm.Year), tm.Month, tm.Day);
-
-        Serial.println(s);
-    } else {
-        Serial.println("DS1302 read error!  Please check the circuitry.");
-        Serial.println();
-        delay(9000);
-    }
     delay(1000);
 }
 
@@ -175,7 +121,6 @@ void print2digits(int number)
 
 void handle_client(WiFiClient *client)
 {
-    tmElements_t tm;
     String req = client->readStringUntil('\r');
     client->flush();
 
@@ -191,28 +136,7 @@ void handle_client(WiFiClient *client)
     }
 
     client->print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>\r\n");
-    if (!RTC.read(tm)) {
-        char *fmt = "Time = %02d:%02d:%02d %d-%02d-%02d\n";
-        char s[30];
-        snprintf(s, sizeof(s) - 1, fmt, tm.Hour, tm.Minute, tm.Second, 
-                tmYearToCalendar(tm.Year), tm.Month, tm.Day);
-
-        Serial.println(s);
-        client->print(s);
-
-        for (int i = 0; i < sizeof wake_hour; i++) {
-            snprintf(s, sizeof(s) - 1, "%d wake %02d:%02d\n", i, wake_hour[i], wake_minute[i]);
-            client->print("<br />");
-            client->print(s);
-        }
-
-        client->print(wake_valid ? "<br />valid" : "<br />invalid");
-
-    } else {
-        Serial.println("DS1302 read error!  Please check the circuitry.");
-        Serial.println();
-        client->print("DS1302 read error! Check circuitry.\n");
-    }	client->print("</html>\n");
+    client->print("</html>\n");
 
     delay(1);
 }
@@ -304,21 +228,6 @@ void update_crc(void)
     EEPROM.write(TIME_CRC, c);
     EEPROM.commit();
     EEPROM.end();
-}
-
-uint8_t set_time(uint16_t _y, uint8_t _m, uint8_t _d, uint8_t _H, uint8_t _M, uint8_t S)
-{
-    time_t t;
-    tmElements_t tm;
-    tm.Year = CalendarYrToTm(_y);
-    tm.Month = _m;
-    tm.Day = _d;
-    tm.Hour = _H;
-    tm.Minute = _M;
-    tm.Second = _S;
-    t = makeTime(tm);
-
-    return RTC.set(t);
 }
 
 uint32_t calc32(const uint8_t *data, size_t length)
