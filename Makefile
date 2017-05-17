@@ -4,5 +4,5 @@ include $(ARDUINO_BASE)/tools/makeEspArduino/makeEspArduino.mk
 
 SKETCH = d1_rtc.ino
 
-#UPLOAD_PORT = /dev/ttyUSB1
+UPLOAD_PORT = /dev/ttyUSB0
 #BOARD = esp210
