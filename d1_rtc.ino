@@ -93,6 +93,7 @@ void setup()
         // alarm
     }
 
+    // Check if supposed to go to sleep or handle wifi connection.
     if (1 /*!goto_sleep*/) {
         WiFi.begin(ssid, password);
         Serial.println("Connecting to wifi");
@@ -103,6 +104,8 @@ void setup()
         server.begin();
         Serial.println(WiFi.localIP());
     } else {
+        // Deep sleep for configured time if time until next alarm is bigger than
+        // configured time. Otherwise sleep a bit but wake up in time for alarm.
         time_sleep = diff < DSLPTIME ? diff - 10 : DSLPTIME;
         rtc_data.crc32 = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
         ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtc_data, sizeof(rtc_data));
@@ -124,13 +127,6 @@ void loop()
     Serial.println("Client done.");
 
     delay(1000);
-}
-
-void print2digits(int number)
-{
-    if (number >= 0 && number < 10)
-        Serial.write('0');
-    Serial.print(number);
 }
 
 void handle_client(WiFiClient *client)
@@ -171,6 +167,9 @@ void handle_client(WiFiClient *client)
     delay(1);
 }
 
+// Shall handle to parse a string and set an alarm.
+// Use something like:
+// /set/alarm/<int>weekday/<int,int,int,int>HHMM
 void set_alarm(String *req)
 {
     // Dummy set
@@ -181,6 +180,10 @@ void set_alarm(String *req)
     }
 }
 
+// Setup current time 
+// Format not sure...
+// Will also add NTP which will render this one pretty useless
+// But might be nice to not rely on internet connection
 void set_time(String *req)
 {
     String s = req->substring(strlen("/set/time/"));
