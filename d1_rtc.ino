@@ -26,11 +26,16 @@ extern "C" {
 
 #include "wifi.h"
 
-void read_mem(void);
+#define WAKEGRACE 60
+#define DSLPTIME 60
+
+
+bool restore_time(void);
+bool save_times(void);
+void set_time(String *req);
+
 void handle_client(WiFiClient *client);
 void set_alarm(String *req);
-bool write_mem(uint8_t d, uint8_t h, uint8_t m);
-void update_crc(void);
 uint32_t calc32(const uint8_t *data, size_t length);
 
 // Storage capacity is 512 bytes
@@ -42,11 +47,13 @@ struct {
 WiFiServer server(80);
 
 bool wake_valid = false;
-uint8_t wake_hour[7];
-uint8_t wake_minute[7];
+struct tm alarms[7];
+time_t time_now;
+time_t time_sleep;
 
 void setup()
 {
+    // Debug
     digitalWrite(4, HIGH);
     pinMode(4, OUTPUT);
 
@@ -68,24 +75,25 @@ void setup()
 
     Serial.println(resetInfo.reason);
 
-    if (ESP.rtcUserMemoryRead(0, (uint32_t*) &rtc_data, sizeof(rtc_data))) {
-        uint32_t crc = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
-        if (crc != rtc_data.crc32) {
-            // Handle crc failure
-        }
-    } else {
-        read_mem();
-    }
-    // DEBUG
-    read_mem();
+    restore_time();
+
     for (int i = 0; i < 7; i++) {
-        Serial.print(wake_hour[i]);
+        Serial.print(alarms[i].tm_hour);
         Serial.print(":");
-        Serial.println(wake_minute[i]);
-
+        Serial.println(alarms[i].tm_min);
     }
 
-    if (0 /*!goto_sleep*/) {
+    struct tm *tnow = localtime(&time_now);
+    int now_sec = tnow->tm_hour * 3600 + tnow->tm_min * 60 + tnow->tm_sec;
+    int d = tnow->tm_wday;
+    int alarm_sec = alarms[d].tm_hour * 3600 + alarms[d].tm_min + alarms[d].tm_sec;
+    int diff = now_sec - alarm_sec;
+
+    if (diff < WAKEGRACE) {
+        // alarm
+    }
+
+    if (1 /*!goto_sleep*/) {
         WiFi.begin(ssid, password);
         Serial.println("Connecting to wifi");
         while (WiFi.status() != WL_CONNECTED) {
@@ -95,22 +103,25 @@ void setup()
         server.begin();
         Serial.println(WiFi.localIP());
     } else {
+        time_sleep = diff < DSLPTIME ? diff - 10 : DSLPTIME;
         rtc_data.crc32 = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
         ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtc_data, sizeof(rtc_data));
-        delay(10000);
         Serial.println("Going to sleep");
-        ESP.deepSleep(5e6);
+        ESP.deepSleep(1000000 * time_sleep);
     }
-
-
 }
 
 void loop()
 {
     WiFiClient client = server.available();
-    if (client && client.available()) { 
+    Serial.println("Wait client");
+    if (client) { 
+        while (!client.available()) delay(1);
+        Serial.println("Handle client");
         handle_client(&client);
     }
+
+    Serial.println("Client done.");
 
     delay(1000);
 }
@@ -128,8 +139,10 @@ void handle_client(WiFiClient *client)
     client->flush();
 
     Serial.println(req);
-    if (req.indexOf("/set") != -1) {
+    if (req.indexOf("/set/alarm") != -1) {
         set_alarm(&req);
+    } else if (req.indexOf("/set/time/") != -1) {
+        set_time(&req);
     } else {
         /*
            Serial.println("invalid request");
@@ -138,7 +151,21 @@ void handle_client(WiFiClient *client)
          */
     }
 
-    client->print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>\r\n");
+    client->print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n \ 
+        <!DOCTYPE HTML>\r\n<html>\r\n");
+    char b[100];
+    for (int i = 0; i < 7; i++) {
+        snprintf(b, sizeof b, "Alarm[%d] -> %02d:%02d<br />\n",
+            i, alarms[i].tm_hour, alarms[i].tm_min);
+        client->print(b);
+    }
+
+    struct tm *t = localtime(&time_now);
+    snprintf(b, sizeof b, "Time now %d-%d-%d %02d:%02d:%02d<br />\n",
+        1900 + t->tm_year, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+    client->print(b);
+    snprintf(b, sizeof b, "Sleep duration %d<br />\n", time_sleep);
+
     client->print("</html>\n");
 
     delay(1);
@@ -148,89 +175,17 @@ void set_alarm(String *req)
 {
     // Dummy set
     for (int i = 0; i < 7; i++) {
-        wake_hour[i] = 6;
-        wake_minute[i] = 25;
-        bool b = write_mem(i, 6, 25);
-        Serial.print("write ");
-        Serial.println(b);
+        alarms[i].tm_hour = 6;
+        alarms[i].tm_min = 25;
+        Serial.print("set alarm ");
     }
-    update_crc();
 }
 
-#define TIME_CRC 14 
-
-void read_mem(void)
+void set_time(String *req)
 {
-    EEPROM.begin(512);
-    uint8_t h = 0;
-    uint8_t m = 0;
-    uint8_t chk;
-    uint8_t cc = 0xee;
-
-    for (int i = 0; i < 7; i++) {
-        h = EEPROM.read(i);
-        m = EEPROM.read(i + 7);
-
-        cc ^= h ^ m;
-
-        if (h < 24 && m < 60) {
-            wake_hour[i] = h;
-            wake_minute[i] = m;
-        }
-    } 
-
-    chk = EEPROM.read(TIME_CRC);
-
-    wake_valid = (cc == chk);
-    Serial.print("read_mem() chksum ");
-    Serial.print(cc);
-    Serial.print(" ");
-    Serial.println(chk);
-
-    EEPROM.end();
-}
-
-bool write_mem(uint8_t d, uint8_t h, uint8_t m)
-{
-    uint8_t eh;
-    uint8_t em;
-
-    EEPROM.begin(512);
-    if (d < 0 && d > 7)
-        return false;
-    if (h > 23)
-        return false;
-    if (m > 59)
-        return false;
-
-    EEPROM.write(d, h);
-    EEPROM.write(d + 7, m);
-
-    eh = EEPROM.read(d);
-    em = EEPROM.read(d+7);
-
-    EEPROM.commit();
-    EEPROM.end();
-    return (h == eh) && (m == em);
-}
-
-void update_crc(void)
-{
-    uint8_t c = 0xee;
-    uint8_t v;
-
-    EEPROM.begin(512);
-    for (int i = 0; i < 14; i++) {
-        v = EEPROM.read(i);
-        c ^= v;
-    }
-
-    Serial.print("update_crc() chksum ");
-    Serial.println(c);
-
-    EEPROM.write(TIME_CRC, c);
-    EEPROM.commit();
-    EEPROM.end();
+    String s = req->substring(strlen("/set/time/"));
+    Serial.println(s);
+    time_now = 1495044685;
 }
 
 uint32_t calc32(const uint8_t *data, size_t length)
@@ -250,4 +205,35 @@ uint32_t calc32(const uint8_t *data, size_t length)
         }
     }
     return crc;
+}
+
+bool restore_time(void)
+{
+    uint8_t sz_alarms = sizeof alarms;
+    uint8_t sz_times = sizeof time_now;
+    uint8_t *p = &rtc_data.data[0];
+
+
+    if (!ESP.rtcUserMemoryRead(0, (uint32_t*) &rtc_data, sizeof rtc_data))
+        return false;
+
+    uint32_t crc = calc32(((uint8_t*) &rtc_data) + 4, sizeof rtc_data - 4);
+    if (crc != rtc_data.crc32)
+            return false;
+    
+    memcpy(&alarms, p, sz_alarms);
+    p += sz_alarms;
+    memcpy(&time_now, p, sz_times);
+    p += sz_times;
+    memcpy(&time_sleep, p, sz_times);
+
+    time_now += time_sleep;
+
+    return true;
+}
+
+bool save_times(void)
+{
+    rtc_data.crc32 = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
+    return ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtc_data, sizeof(rtc_data));
 }
