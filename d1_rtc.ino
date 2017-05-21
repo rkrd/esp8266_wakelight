@@ -17,6 +17,8 @@
 #include <time.h>
 #include <ESP8266WiFi.h>
 #include <EEPROM.h>
+#include <WiFiUdp.h>
+
 
 extern "C" {
 #include <user_interface.h>
@@ -27,7 +29,11 @@ extern "C" {
 #include "wifi.h"
 
 #define WAKEGRACE 60
-#define DSLPTIME 60
+#define DSLPTIME (60 * 60)
+
+#define NTP_PACKET_SIZE 48
+#define SEVENTY_YEARS 2208988800UL
+
 
 
 bool restore_time(void);
@@ -37,6 +43,8 @@ void set_time(String *req);
 void handle_client(WiFiClient *client);
 void set_alarm(String *req);
 uint32_t calc32(const uint8_t *data, size_t length);
+time_t get_ntp_time(void);
+
 
 // Storage capacity is 512 bytes
 struct {
@@ -239,4 +247,69 @@ bool save_times(void)
 {
     rtc_data.crc32 = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
     return ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtc_data, sizeof(rtc_data));
+}
+time_t get_ntp_time(void)
+{
+	WiFiUDP udp;
+	unsigned int localPort = 2390;
+	udp.begin(localPort);
+
+	IPAddress ipaddr;
+	const char* ntp_url = "time.nist.gov";
+
+
+	byte packet[NTP_PACKET_SIZE];
+
+	WiFi.hostByName(ntp_url, ipaddr);
+
+	Serial.println(String("Server IP ") + ipaddr);
+	Serial.println("sending NTP packet...");
+
+	memset(packet, 0, NTP_PACKET_SIZE);
+
+	packet[0] = 0b11100011;   // LI, Version, Mode
+	packet[1] = 0;     // Stratum, or type of clock
+	packet[2] = 6;     // Polling Interval
+	packet[3] = 0xEC;  // Peer Clock Precision
+	// 8 bytes of zero for Root Delay & Root Dispersion
+	packet[12]  = 49;
+	packet[13]  = 0x4E;
+	packet[14]  = 49;
+	packet[15]  = 52;
+
+	udp.beginPacket(ipaddr, 123);
+	udp.write(packet, NTP_PACKET_SIZE);
+	udp.endPacket();
+	yield();
+
+	int cb;
+	while (cb = udp.parsePacket(), !cb) {
+		Serial.println("no packet yet");
+		Serial.println(cb);
+		delay(500);
+		udp.beginPacket(ipaddr, 123);
+		udp.write(packet, NTP_PACKET_SIZE);
+		udp.endPacket();
+		yield();
+	}
+
+	Serial.print("packet received, length=");
+	Serial.println(cb);
+	udp.read(packet, NTP_PACKET_SIZE); // read the packet into the buffer
+
+	time_t t = packet[40] << 24 | packet[41] << 16 | packet[42] << 8 | packet[43];
+	t -= SEVENTY_YEARS;
+
+	struct tm *ntp_tm = gmtime(&t);
+	char str[100];
+	snprintf(str, 100, "%d-%d-%d %d:%d\n",
+		ntp_tm->tm_year + 1900,
+		ntp_tm->tm_mon,
+		ntp_tm->tm_mday,
+		ntp_tm->tm_hour,
+		ntp_tm->tm_min);
+	Serial.print(String("Time recieved: "));
+	Serial.println(String(str));
+
+	return t;
 }
