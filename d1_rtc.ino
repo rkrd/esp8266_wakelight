@@ -6,6 +6,7 @@
  * - Disable deepsleep if reset is from reset button.
  * - Wake up from deepsleep from button or similar. Use reset-button.
  * - Extend setup mode/function.
+ * - system_get_rtc_time() // Check if usefull
  * Notes:
  * - rtc mem and ROM are not the same :)
  */
@@ -19,11 +20,16 @@
 #include <EEPROM.h>
 #include <WiFiUdp.h>
 
+#define RTC_USRMEM_START 64
+#define MEM_ALIGN 4
 
 extern "C" {
 #include <user_interface.h>
-    extern struct rst_info resetInfo;
+const rst_info *rst_inf;
 }
+extern "C" void esp_yield();
+
+//#define NODWEET
 
 
 #include "wifi.h"
@@ -40,7 +46,7 @@ extern "C" {
 
 
 
-bool restore_time(void);
+int restore_time(void);
 bool save_times(void);
 void set_time(String *req);
 
@@ -58,24 +64,31 @@ struct {
     byte data[508];
 } rtc_data;
 
+struct alarm {
+    uint8_t a_hour;
+    uint8_t a_min;
+} __attribute__ ((aligned (MEM_ALIGN)));
+
 WiFiServer server(80);
 
-bool wake_valid = false;
-struct tm alarms[7];
-time_t time_now;
-time_t time_sleep;
+struct alarm *alarms;
+time_t *time_now;
+time_t *time_sleep;
+time_t *time_comp;
+byte *sleep_cycles;
 
 void setup()
 {
     bool nosleep = false;
-    bool start_server = true;
+    bool start_server = false;
 
     Serial.begin(9600);
 
 
     Serial.print("Reset reason: ");
+    rst_inf = system_get_rst_info();
 
-    switch(resetInfo.reason) {
+    switch(rst_inf->reason) {
         case REASON_DEEP_SLEEP_AWAKE:
             Serial.println("Deep-Sleep Wake");
             break;
@@ -89,30 +102,39 @@ void setup()
             break;
     }
 
-    Serial.println(time_now);
-    if(restore_time())
+    int ret = restore_time();
+    Serial.println(String("restore ret: ") + ret);
+    if(!ret) {
+        if (!rtc_data.data[0]) {
+            /* RTC data not init. */
+            *sleep_cycles = 0;
+        }
         Serial.println("Restore time OK");
-    else
-        Serial.println("Restore time fail");
-    Serial.println(time_now);
-
-    for (int i = 0; i < 7; i++) {
-        Serial.print(alarms[i].tm_hour);
-        Serial.print(":");
-        Serial.println(alarms[i].tm_min);
+        Serial.println(*time_now);
+        Serial.println(*time_sleep);
+        Serial.println(*time_comp);
+        for (int i = 0; i < 7; i++) {
+            Serial.print(alarms[i].a_hour);
+            Serial.print(":");
+            Serial.println(alarms[i].a_min);
+        }
+    } else {
+        Serial.println("Restore time fail " + ret);
     }
 
     blink_debug(DEBUGPIN);
 
-    struct tm *tnow = localtime(&time_now);
+    /*
+    struct tm *tnow = localtime(&*time_now);
     int now_sec = tnow->tm_hour * 3600 + tnow->tm_min * 60 + tnow->tm_sec;
     int d = tnow->tm_wday;
-    int alarm_sec = alarms[d].tm_hour * 3600 + alarms[d].tm_min + alarms[d].tm_sec;
+    int alarm_sec = alarms[d].a_hour * 3600 + alarms[d].a_min + alarms[d].tm_sec;
     int diff = now_sec - alarm_sec;
 
     if (diff < WAKEGRACE) {
         // alarm
     }
+    */
 
     WiFi.begin(ssid, password);
     Serial.println("Connecting to wifi");
@@ -123,24 +145,44 @@ void setup()
     Serial.println(WiFi.localIP());
 
     if (start_server) {
+        Serial.println("rtc timeget");
+        Serial.println(system_get_rtc_time());
         server.begin();
     } else {
 
-        dweet(String("Time_before_restore_") + time_now);
-        time_now = get_ntp_time();
-        dweet(String("Time_after_restore_") + time_now);
+        time_t tsave = *time_now;
+        *time_now = get_ntp_time();
+        
+        // Check how much times differs and compensate with 2/3 of that time.
+        time_t difft = tsave - *time_now;
+        difft *= 2;
+        difft /= 3;
+        *time_comp += difft;
+        difft = *time_comp;
+
+        if (rst_inf->reason != REASON_DEEP_SLEEP_AWAKE) {
+            Serial.println("Reset reason not deepsleep wake, not using timediff");
+            difft = 0;
+        }
+
+#ifndef NODWEET
+        dweet(String("restore_") + tsave + String("_ntp_") + *time_now + String("_compensation_") + difft + String("_cycle_") + *sleep_cycles);
+#endif
 
         // Deep sleep for configured time if time until next alarm is bigger than
         // configured time. Otherwise sleep a bit but wake up in time for alarm.
-        time_sleep = DSLPTIME;//diff < DSLPTIME ? diff - 10 : DSLPTIME;
+        *time_sleep = DSLPTIME;//diff < DSLPTIME ? diff - 10 : DSLPTIME;
 
         save_times();
         Serial.println("Going to sleep");
-        Serial.println(String("Time to sleep:") + time_sleep);
-        Serial.println(String("Time nowe:") + time_now);
-        //ESP.deepSleep(1000 * 1000 * time_sleep);
+        Serial.println(String("Time to sleep:") + *time_sleep);
+        Serial.println(String("Time nowe:") + *time_now);
+        Serial.println(String("Time compensation:") + difft);
+        Serial.println(String("Sleep cycles:") + *sleep_cycles);
         Serial.println("Go to sleep");
-        ESP.deepSleep(1000000 * 60 * 5);
+        *sleep_cycles += 1;
+        system_deep_sleep(1000000 * (*time_sleep + difft));
+        esp_yield();
     }
 }
 
@@ -186,15 +228,15 @@ void handle_client(WiFiClient *client)
     char b[100];
     for (int i = 0; i < 7; i++) {
         snprintf(b, sizeof b, "Alarm[%d] -> %02d:%02d<br />\n",
-                i, alarms[i].tm_hour, alarms[i].tm_min);
+                i, alarms[i].a_min, alarms[i].a_min);
         client->print(b);
     }
 
-    struct tm *t = localtime(&time_now);
+    struct tm *t = localtime(time_now);
     snprintf(b, sizeof b, "Time now %d-%d-%d %02d:%02d:%02d<br />\n",
             1900 + t->tm_year, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
     client->print(b);
-    snprintf(b, sizeof b, "Sleep duration %d<br />\n", time_sleep);
+    snprintf(b, sizeof b, "Sleep duration %d<br />\n", *time_sleep);
 
     client->print("</html>\n");
 
@@ -209,8 +251,8 @@ void set_alarm(String *req)
     if (!req) {
         // Dummy set
         for (int i = 0; i < 7; i++) {
-            alarms[i].tm_hour = 6;
-            alarms[i].tm_min = 25;
+            alarms[i].a_hour = 6;
+            alarms[i].a_min = 25;
             Serial.print("set alarm ");
         }
     }
@@ -226,8 +268,8 @@ void set_alarm(String *req)
     s = s.substring(2);
     t = s.toInt();
 
-    alarms[wday].tm_hour = t / 100;
-    alarms[wday].tm_min = t - (t / 100) * 100;
+    alarms[wday].a_hour = t / 100;
+    alarms[wday].a_min = t - (t / 100) * 100;
 
     save_times();
 }
@@ -240,7 +282,7 @@ void set_time(String *req)
 {
     String s = req->substring(strlen("/set/time/"));
     Serial.println(s);
-    time_now = 1495044685;
+    *time_now = 1495044685;
 }
 
 uint32_t calc32(const uint8_t *data, size_t length)
@@ -262,46 +304,48 @@ uint32_t calc32(const uint8_t *data, size_t length)
     return crc;
 }
 
-bool restore_time(void)
+int restore_time(void)
 {
-    uint8_t sz_alarms = sizeof alarms;
-    uint8_t sz_times = sizeof time_now;
-    uint8_t *p = &rtc_data.data[0];
+    uint8_t sz_alarms = 7 * sizeof *alarms; // 7 alarms stored in struct tm
+    uint8_t sz_times = sizeof *time_now;
+    uint8_t *p;
 
 
-    if (!ESP.rtcUserMemoryRead(0, (uint32_t*) &rtc_data, sizeof rtc_data))
-        return false;
+    if (!system_rtc_mem_read(RTC_USRMEM_START + 0, (uint32_t*) &rtc_data, sizeof rtc_data))
+        return -1;
 
-    uint32_t crc = calc32(((uint8_t*) &rtc_data) + 4, sizeof rtc_data - 4);
-    if (crc != rtc_data.crc32)
-        return false;
+    if (!rtc_data.data[0]) {
+        uint32_t crc = calc32(((uint8_t*) &rtc_data) + 4, sizeof rtc_data - 4);
+        if (crc != rtc_data.crc32)
+            return -2;
+    }
 
-    memcpy(&alarms, p, sz_alarms);
+    p = rtc_data.data;
+    p += MEM_ALIGN;
+
+    alarms = (struct alarm*)p;
     p += sz_alarms;
-    memcpy(&time_now, p, sz_times);
+
+    time_now = (time_t*)p;
     p += sz_times;
-    memcpy(&time_sleep, p, sz_times);
 
-    time_now += time_sleep;
+    time_sleep = (time_t*)p;
+    p += sz_times;
 
-    return true;
+    time_comp = (time_t*)p;
+    p += sz_times;
+
+    sleep_cycles = p;
+
+    *time_now += *time_sleep;
+
+    return 0;
 }
 
 bool save_times(void)
 {
-
-    uint8_t sz_alarms = sizeof alarms;
-    uint8_t sz_times = sizeof time_now;
-    uint8_t *p = &rtc_data.data[0];
-
-    memcpy(p, &alarms, sz_alarms);
-    p += sz_alarms;
-    memcpy(p, &time_now, sz_times);
-    p += sz_times;
-    memcpy(p, &time_sleep, sz_times);
-
     rtc_data.crc32 = calc32(((uint8_t*) &rtc_data) + 4, sizeof(rtc_data) - 4);
-    return ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtc_data, sizeof(rtc_data));
+    return system_rtc_mem_write(RTC_USRMEM_START + 0, (uint32_t*) &rtc_data, sizeof(rtc_data));
 }
 
 void blink_debug(int pin)
@@ -312,8 +356,8 @@ void blink_debug(int pin)
     pinMode(pin, OUTPUT);
     pinMode(13, INPUT);
     digitalWrite(13, LOW);
-    for (int i = 0; i < 10; ++i) {
-        delay(200);
+    for (int i = 0; i < 5; ++i) {
+        delay(100);
         digitalWrite(pin, i % 2);
         Serial.print(i%2);
     }
