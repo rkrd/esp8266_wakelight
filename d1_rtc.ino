@@ -20,6 +20,8 @@
 #include <EEPROM.h>
 #include <WiFiUdp.h>
 
+#include "alarm.h"
+
 #define RTC_USRMEM_START 64
 #define MEM_ALIGN 4
 
@@ -66,11 +68,6 @@ struct {
     uint32_t crc32;
     byte data[508];
 } rtc_data;
-
-struct alarm {
-    uint8_t a_hour;
-    uint8_t a_min;
-} __attribute__ ((aligned (MEM_ALIGN)));
 
 WiFiServer server(80);
 
@@ -120,7 +117,7 @@ void setup()
     time_t tsave = *time_now;
     if (!init && !(*sleep_cycles % SYNC_CYCLES)) {
         *time_now = get_ntp_time();
-        *time_comp = sleep_comp(tsave, *time_now);
+        *time_comp += sleep_comp(tsave, *time_now);
     }
     dweet(String("restore_") + tsave + String("_ntp_") + *time_now + String("_compensation_") + *time_comp + String("_cycle_") + *sleep_cycles);
 
@@ -512,7 +509,8 @@ void init_wifi(void)
     WiFi.begin(ssid, password);
     Serial.println("Connecting to wifi");
     while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
+        //delay(500);
+        blink_debug(DEBUGPIN);
         Serial.print(".");
     }
     Serial.println(WiFi.localIP());
